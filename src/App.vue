@@ -1,116 +1,141 @@
 <script setup>
-import { onMounted, ref } from 'vue';
+import { usePetInteractions } from './config/usePetInteractions';
+import Live2dViewer from "./views/Live2dViewer.vue";
+import {ref} from "vue";
 
-// 注意：这里不再 import PIXI 和 Live2DModel，完全从 window 获取
-const canvasRef = ref();
+const {
+  setIgnoreMouse, handleDrag, startRecording,
+  stopRecording, handleAction
+} = usePetInteractions();
 
-onMounted(() => {
-  const initLive2D = async () => {
-// 更加精确的检查：直接检查构造函数是否存在
-    const isReady = window.PIXI &&
-        window.PIXI.live2d &&
-        typeof window.PIXI.live2d.Live2DModel === 'function';
+let pressTimer = null;
+let isRecording = false;
+let startTimestamp = 0;
+let startPos = { x: 0, y: 0 };
+let isDraggingTriggered = ref(false); // 标记是否已经开启了系统拖拽
+const isRecordingStatus = ref(false); // 新增：用于界面显示
+const onDown = (e) => {
+  if (e.button !== 0) return;
 
-    console.log("检查 PIXI:", !!window.PIXI);
-    console.log("检查 PIXI.live2d:", window.PIXI ? !!window.PIXI.live2d : false);
-    console.log("检查 Live2DModel:", isReady);
+  startTimestamp = Date.now();
+  startPos = { x: e.screenX, y: e.screenY };
+  isRecording = false;
+  isDraggingTriggered.value = false;
 
-    if (!isReady) {
-      console.warn("Live2DModel 尚未就绪... 持续重试");
-      setTimeout(initLive2D, 100);
-      return;
+  // 1. 延迟判定录音：只有在没发生拖拽的情况下才开启录音
+  pressTimer = setTimeout(() => {
+    if (!isDraggingTriggered.value) {
+      isRecording = true;
+      startRecording();
     }
+  }, 500);
+};
 
-    // 只有当 isReady 为 true 时才执行后续逻辑
-    const {Live2DModel} = window.PIXI.live2d;
+// 监听移动：如果移动距离超过阈值，则视为拖拽
+const onMove = (e) => {
+  // if (isRecording || isDraggingTriggered.value || startPos.x === 0) return;
+  //
+  // const dx = e.screenX - startPos.x;
+  // const dy = e.screenY - startPos.y;
+  //
+  // // 移动超过 5 像素则触发系统拖拽
+  // if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+  //   isDraggingTriggered.value = true;
+  //   clearTimeout(pressTimer); // 移动了就不录音了
+  //   handleDrag(e);
+  // }
+  // 确保能获取到坐标，PIXI 事件通常在 e.data.global 或 nativeEvent 中
+  const screenX = e.screenX || e.data?.global?.x;
+  const screenY = e.screenY || e.data?.global?.y;
 
-    try {
-      const app = new PIXI.Application({
-        // 兼容性写法：优先尝试 view
-        view: canvasRef.value,
-        // 如果你后续升级到 v8，可以改成 canvas: canvasRef.value
-        autoStart: true,
-        backgroundAlpha: 0,
-        resizeTo: window,
-        antialias: true,
-        hello: true, // 开启控制台欢迎语，确认 PIXI 运行正常
-        // ✨ 强制开启事件处理，解决 currentTarget 报错
-        eventMode: 'dynamic',
-        eventFeatures: {
-          move: true,
-          globalMove: false,
-          click: true,
-          wheel: true,
-        }
-      });
+  if (isRecording || isDraggingTriggered.value || !startPos.x || !screenX) return;
 
-      const modelUrl = "model/runtime/kei_basic_free.model3.json";
-      const model = await Live2DModel.from(modelUrl, {autoInteract: false});
+  const dx = screenX - startPos.x;
+  const dy = screenY - startPos.y;
 
-      // app.stage.addChild(model);
-      // model.scale.set(0.2);
-      // console.log("模型加载成功！");
-      // ✨ 自适应缩放逻辑
-      const fitModel = () => {
-        const windowHeight = window.innerHeight;
-        const windowWidth = window.innerWidth;
+  if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+    console.log("检测到移动，触发拖拽", dx, dy); // 添加日志确认是否进入此逻辑
+    isDraggingTriggered.value = true;
+    clearTimeout(pressTimer);
+    handleDrag(e);
+  }
+};
 
-        // 1. 使用插件自带的比例适配方法
-        // 这会将模型宽度或高度适配到屏幕的 80%
-        const boundary = Math.min(windowWidth, windowHeight) * 0.8;
+const onUp = async () => {
+  clearTimeout(pressTimer);
+  const duration = Date.now() - startTimestamp;
+  const finalStartTimestamp = startTimestamp;
+  startTimestamp = 0; // 重置
 
-        // 这种方法会自动计算 scale，避开 coreModel.canvasHeight 可能为 undefined 的问题
-        model.width = boundary;
-        model.scale.y = model.scale.x; // 保持等比例缩放
+  if (isDraggingTriggered.value) {
+    // 如果已经触发了拖拽，系统会接管 mouseup，这里的逻辑可能不会执行
+    return;
+  }
 
-        // 2. 居中定位
-        model.x = (windowWidth - model.width) / 2;
-        // model.y = windowHeight - model.height;
-        // 向上偏移 20 像素，留出一点呼吸空间
-        model.y = windowHeight - model.height - 20;
+  if (isRecording) {
+    // 情况 A: 结束录音
+    await stopRecording();
+    isRecording = false;
+  } else if (duration < 300 && duration > 0) {
+    // 情况 B: 判定为快速点击
+    handleAction();
+  }
+  await setIgnoreMouse(true)
+};
+const onPointerOver = () => {
+  console.log("响应：关闭穿透");
+  // setIgnoreMouse(false);
+};
 
-        console.log("当前缩放比例:", model.scale.x);
-      };
-
-      fitModel();
-      app.stage.addChild(model);
-
-// 监听窗口大小变化（比如手机横竖屏切换）
-      window.addEventListener('resize', fitModel);
-
-      // 在 model 加载成功后添加以下逻辑
-      model.interactive = true; // 开启模型交互
-
-    } catch (error) {
-      console.error("加载过程中发生错误:", error);
+const onPointerOut = () => {
+  // 延迟一小会儿再穿透，防止微小抖动导致的失焦
+  setTimeout(() => {
+    if (!isRecording && !isDraggingTriggered.value) {
+      console.log("响应：开启穿透");
+      // setIgnoreMouse(true);
     }
-  };
-
-  initLive2D();
-});
+  }, 100);
+};
 </script>
 
 <template>
-  <canvas ref="canvasRef" class="pet-canvas"></canvas>
+  <div class="main-app">
+    <Live2dViewer
+        modelPath="model/runtime/kei_basic_free.model3.json"
+        @pointerover="onPointerOver"
+        @pointerout="onPointerOut"
+        @pointerdown="onDown"
+        @pointermove="onMove"
+        @pointerup="onUp"
+    />
+  </div>
 </template>
 
 <style>
-/* App.vue 中的样式 */
-body, html, #app {
+/* 彻底禁止点击时的所有高亮和轮廓 */
+* {
+  -webkit-tap-highlight-color: transparent;
+  outline: none !important;
+  user-select: none; /* 防止长按选中文本蓝色高亮 */
   margin: 0;
   padding: 0;
-  width: 100vw;
-  height: 100vh;
+}
+canvas {
+  outline: none !important;
+  border: none !important;
+  box-shadow: none !important; /* 彻底移除这个该死的模糊阴影 */
+  filter: none !important; /* 防止使用了 drop-shadow 滤镜 */
+  border-radius: 0 !important; /* 清除可能存在的圆角 */
+  background: transparent !important; /* 确保背景彻底透明 */
+}
+html, body, #app {
+  margin: 0; padding: 0;
+  width: 450px; height: 600px;
+  background: transparent !important;
   overflow: hidden;
-  /*  background: transparent !important; */
-    /* 整个网页背景不接收点击，允许穿透到桌面图标 */
-  background: rgba(255, 255, 255, 0.5) !important;
-  pointer-events: none;
+  /* 关键：PC端这里必须为 auto，否则JS永远收不到 hover 事件 */
+  pointer-events: none; /* 全局穿透 */
 }
 
-.pet-canvas {
-  display: block;
-  /* ✨ 核心：只有人物画布响应点击（如果你想点她的话） */
-  pointer-events: none;
-}
+.main-app { width: 100%; height: 100%; }
 </style>

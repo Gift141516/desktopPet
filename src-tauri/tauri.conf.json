@@ -13,13 +13,15 @@
     "windows": [
       {
         "title": "桌面宠物",
-        "width": 800,
+        "width": 450,
         "height": 600,
-        "transparent": true,
         "decorations": false,
-        "fullscreen": false,
-        "resizable": true,
-        "alwaysOnTop": true
+        "transparent": true,
+        "alwaysOnTop": true,
+        "resizable": false,
+        "shadow": false,
+        "skipTaskbar": false,
+        "visible": true
       }
     ],
     "security": {
