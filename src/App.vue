@@ -1,19 +1,35 @@
 <script setup>
 import { usePetInteractions } from './config/usePetInteractions';
 import Live2dViewer from "./views/Live2dViewer.vue";
-import {ref} from "vue";
+import {onMounted, ref} from "vue";
+import {invoke} from "@tauri-apps/api/core";
+import {listen} from "@tauri-apps/api/event";
 
 const {
-  setIgnoreMouse, handleDrag, startRecording,
+   handleDrag, startRecording,
   stopRecording, handleAction
 } = usePetInteractions();
-
+const viewerRef = ref(null);
 let pressTimer = null;
 let isRecording = false;
 let startTimestamp = 0;
 let startPos = { x: 0, y: 0 };
 let isDraggingTriggered = ref(false); // 标记是否已经开启了系统拖拽
 const isRecordingStatus = ref(false); // 新增：用于界面显示
+
+// 右键事件
+const onRightClick = async (e) => {
+  // 1. 阻止浏览器默认的右键菜单（那个难看的网页菜单）
+  // 如果 Live2dViewer 内部没处理，这里必须调用
+  if (e.preventDefault) e.preventDefault();
+
+  // 2. 弹出 Rust 原生菜单
+  try {
+    await invoke('show_main_menu');
+  } catch (err) {
+    console.error("弹出菜单失败:", err);
+  }
+};
 const onDown = (e) => {
   if (e.button !== 0) return;
 
@@ -78,9 +94,11 @@ const onUp = async () => {
     isRecording = false;
   } else if (duration < 300 && duration > 0) {
     // 情况 B: 判定为快速点击
-    handleAction();
+    // handleAction();
+    await handleAction((val) => {
+      viewerRef.value?.lipSync(val);
+    });
   }
-  await setIgnoreMouse(true)
 };
 const onPointerOver = () => {
   console.log("响应：关闭穿透");
@@ -96,17 +114,32 @@ const onPointerOut = () => {
     }
   }, 100);
 };
+onMounted(async () => {
+  await listen('menu-action', (event) => {
+    const action = event.payload; // 这就是 menu.rs 里 emit 的 "weather" 或 "chat"
+
+    if (action === 'weather') {
+      console.log("用户点击了：今天天气怎么样");
+      // 这里写你的天气逻辑，比如：
+      // handleWeatherAction();
+    } else if (action === 'chat') {
+      console.log("用户点击了：陪我聊聊天");
+    }
+  });
+});
 </script>
 
 <template>
   <div class="main-app">
     <Live2dViewer
+        ref="viewerRef"
         modelPath="model/runtime/kei_basic_free.model3.json"
         @pointerover="onPointerOver"
         @pointerout="onPointerOut"
         @pointerdown="onDown"
         @pointermove="onMove"
         @pointerup="onUp"
+        @contextmenu="onRightClick"
     />
   </div>
 </template>

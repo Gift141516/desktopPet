@@ -7,6 +7,8 @@ const canvasRef = ref();
 
 const canvasWidth = 450;
 const canvasHeight = 600;
+let lastMouthValue = 0;
+let model = null
 
 onMounted(() => {
   const init = async () => {
@@ -32,7 +34,7 @@ onMounted(() => {
 
     // const model = await window.PIXI.live2d.Live2DModel.from(props.modelPath);
     //不能使用上面的方法,否则无法显示人物
-    const model = await Live2DModel.from(props.modelPath, {autoInteract: false});
+    model = await Live2DModel.from(props.modelPath, {autoInteract: false});
     const scaleX = canvasWidth / model.width;
     const scaleY = canvasHeight / model.height;
     const scale = Math.max(scaleX, scaleY);
@@ -68,6 +70,29 @@ onMounted(() => {
   };
   init();
 });
+// 暴露一个给模型对口型的方法
+const lipSync = (targetValue) => {
+  if (model && model.internalModel) {
+    // 强制归零逻辑：如果值非常小，直接设为 0
+    const effectiveValue = targetValue < 0.01 ? 0 : targetValue;
+
+    // 提高平滑度，防止突兀
+    const lerp = 0.3;
+    const smoothedValue = lastMouthValue + (effectiveValue - lastMouthValue) * lerp;
+    lastMouthValue = smoothedValue;
+
+    // 重点：使用核心 API 设置参数
+    const coreModel = model.internalModel.coreModel;
+    coreModel.setParameterValueById('ParamMouthOpenY', smoothedValue);
+
+    // 如果是结束阶段（smoothedValue 趋于 0），额外强制刷新一次
+    if (smoothedValue < 0.001) {
+      coreModel.setParameterValueById('ParamMouthOpenY', 0);
+    }
+  }
+};
+// 通过 emit 或者 defineExpose 传出去
+defineExpose({ lipSync });
 </script>
 
 <template>

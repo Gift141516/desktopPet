@@ -68,7 +68,7 @@ export function usePetInteractions() {
     let analyser = null;
     let dataArray = null;
     let animationId = null;
-    const handleAction = (onLipSync) => {
+    const handleAction = async(onLipSync) => {
         const now = Date.now();
         if (now - lastTap < 300) {
             if (savedAudioUrl.value) {
@@ -78,7 +78,9 @@ export function usePetInteractions() {
                 if (!audioContext) {
                     audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 }
-
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
                 const source = audioContext.createMediaElementSource(audio);
                 analyser = audioContext.createAnalyser();
                 analyser.fftSize = 128; // 较小的采样率足够口型使用
@@ -87,26 +89,33 @@ export function usePetInteractions() {
 
                 dataArray = new Uint8Array(analyser.frequencyBinCount);
 
+                // usePetInteractions.js 里的 animate 函数片段
+                // usePetInteractions.js 里的 handleAction 内部
                 const animate = () => {
+                    // 检查音频是否结束
                     if (audio.paused || audio.ended) {
-                        onLipSync(0); // 结束时闭嘴
+                        cancelAnimationFrame(animationId);
+                        animationId = null;
+                        // 核心：强制发送 0 信号
+                        onLipSync(0);
+                        console.log("音频播放结束，强制闭嘴");
                         return;
                     }
+
                     analyser.getByteFrequencyData(dataArray);
-                    // 计算平均音量
-                    let sum = 0;
-                    for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-                    const average = sum / dataArray.length;
+                    const voiceData = dataArray.slice(0, dataArray.length / 2);
+                    let average = voiceData.reduce((a, b) => a + b) / voiceData.length;
 
-                    // 映射：音量通常在 0-255，映射到 0-1 的口型参数
-                    // 阈值 50-60 左右可以让嘴巴动作更明显
-                    const mouthValue = Math.min(average / 60, 1);
+                    // 提高过滤门槛，防止最后的电流声让嘴巴停在微张状态
+                    const noiseFloor = 40;
+                    const sensitiveVolume = Math.max(0, average - noiseFloor);
+                    const mouthValue = Math.min(sensitiveVolume / 30, 1.0);
+
                     onLipSync(mouthValue);
-
                     animationId = requestAnimationFrame(animate);
                 };
 
-                audio.play();
+                await audio.play();
                 animate();
             }
         }
