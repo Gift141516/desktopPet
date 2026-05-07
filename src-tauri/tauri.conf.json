@@ -20,23 +20,21 @@
         "alwaysOnTop": true,
         "resizable": false,
         "shadow": false,
-        "skipTaskbar": false,
         "visible": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' stream:; media-src 'self' stream:; connect-src 'self' stream:;"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
+    "externalBin": [
+      "binaries/tts-engine"
+    ],
+    "resources": [
+      "resources/models/*"
     ]
   }
 }

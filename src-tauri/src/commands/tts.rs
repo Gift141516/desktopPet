@@ -1,8 +1,11 @@
 // commands.rs
 // 导入 Tauri 核心组件：Runtime（运行时环境）、Window（窗口对象）、Menu（菜单对象）
-use tauri::{Runtime, Window, menu::Menu};
-use tauri::menu::ContextMenu;
-
+use tauri::{AppHandle, Manager, Runtime, Window};
+// 核心修复 2：引入 ShellExt 才能使用 .shell() 方法
+use tauri_plugin_shell::ShellExt;
+// 核心修复 3：引入 ContextMenu 才能使用 .popup() 方法
+use tauri::menu::{ContextMenu, Menu};
+// use tauri_plugin_shell::ShellExt;
 // -------------------------------------------------------------------------
 // 1. #[tauri::command] 宏：
 //    这个标记告诉 Tauri，这个 Rust 函数可以被前端 JS 通过 invoke('函数名') 直接调用。
@@ -18,8 +21,41 @@ use tauri::menu::ContextMenu;
 pub fn show_main_menu<R: Runtime>(window: Window<R>, menu: tauri::State<'_, Menu<R>>) {
     // 使用 window.show_menu 在鼠标当前位置弹出菜单。
     // .inner() 用于从 State 容器中取出原始的 Menu 对象，.clone() 是为了满足所有权传递。
-//     let _ = window.show_menu(menu.inner().clone());
+    //     let _ = window.show_menu(menu.inner().clone());
     let _ = menu.popup(window);
+}
+
+#[tauri::command]
+pub async fn generate_tts<R: Runtime>(app: AppHandle<R>, text: String) -> Result<Vec<u8>, String> {
+    let resource_path = app.path().resource_dir().unwrap().join("resources/models");
+    let model = resource_path.join("model.onnx");
+    let lexicon = resource_path.join("lexicon.txt");
+    let tokens = resource_path.join("tokens.txt");
+
+    let output_path = app
+        .path()
+        .app_cache_dir()
+        .unwrap()
+        .join("speech_output.wav");
+
+    let sidecar_command = app.shell().sidecar("tts-engine").unwrap().args([
+        format!("--vits-model={}", model.display()),
+        format!("--vits-lexicon={}", lexicon.display()),
+        format!("--vits-tokens={}", tokens.display()),
+        "--sid=0".to_string(),
+        format!("--output-filename={}", output_path.display()),
+        text,
+    ]);
+
+    let output = sidecar_command.output().await.map_err(|e| e.to_string())?;
+
+    if output.status.success() {
+        // 核心修复：不返回路径了，直接把音频文件读取为字节数组发给前端
+        let audio_data = std::fs::read(&output_path).map_err(|e| e.to_string())?;
+        Ok(audio_data)
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
 }
 
 // -------------------------------------------------------------------------

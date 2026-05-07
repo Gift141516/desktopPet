@@ -7,6 +7,19 @@
     "core:default",
     "opener:default",
     "core:window:allow-start-dragging",
-    "core:window:allow-set-ignore-cursor-events"
+    "core:window:allow-set-ignore-cursor-events",
+    "core:path:default",
+    "core:resources:default",
+    "core:webview:default",
+    "shell:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "binaries/tts-engine",
+          "args": true
+        }
+      ]
+    }
   ]
 }

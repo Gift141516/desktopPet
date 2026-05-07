@@ -1,11 +1,11 @@
-// 1. 声明模块：编译器会去寻找同名的 menu.rs 和 commands.rs 文件
+// 1. 声明模块
+mod commands; // 对应你的 commands 文件夹
 mod menu;
-mod commands;
+mod protocol;
 
 use tauri::Manager;
 
-// 定义基础命令：控制窗口鼠标穿透
-// 提示：如果这个命令以后变多，也可以挪到 commands.rs 里
+// 基础命令保留
 #[tauri::command]
 fn set_ignore_mouse(window: tauri::Window, ignore: bool) {
     let _ = window.set_ignore_cursor_events(ignore);
@@ -13,38 +13,35 @@ fn set_ignore_mouse(window: tauri::Window, ignore: bool) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    // 【关键改动】：先创建一个 builder 实例
+    let mut builder = tauri::Builder::default();
+
+    // 【核心修复】：在这里调用 protocol 模块注册流协议
+    // 因为你的 protocol::register_stream_protocol 现在接收并返回 builder
+    builder = protocol::register_stream_protocol(builder);
+
+    builder
         .plugin(tauri_plugin_opener::init())
-        // -------------------------------------------------------------------------
-        // 2. 注册命令：所有在 commands.rs 中标记了 #[tauri::command] 且想让 JS 调用的函数，
-        // 都必须在这里通过 commands::函数名 的形式进行注册。
-        // -------------------------------------------------------------------------
+        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             set_ignore_mouse,
-            commands::show_main_menu // 注册弹出菜单的指令
+            // 注意这里的路径：commands::模块名::函数名
+            commands::tts::show_main_menu,
+            commands::tts::generate_tts,
+            commands::window::toggle_side_status // 你新写的贴边指令
         ])
         .setup(|app| {
-            let window = app.get_webview_window("main").unwrap();
+            // --- 菜单初始化 ---
+            let m = menu::create_menu(app.handle())?;
+            app.manage(m);
+            app.on_menu_event(menu::handle_menu_event);
 
             // --- 窗口基础配置 ---
-            window.set_always_on_top(true).unwrap(); // 始终置顶
-            window.set_resizable(false).unwrap();    // 禁用缩放（解决 Windows 阴影残留关键）
-            window.set_decorations(false).unwrap();  // 去掉系统边框
-
-            // -------------------------------------------------------------------------
-            // 3. 菜单初始化逻辑：使用 menu.rs 模块
-            // -------------------------------------------------------------------------
-            // 调用 menu.rs 里的 create_menu 函数创建菜单对象
-            let m = menu::create_menu(app.handle())?;
-
-            // 将菜单对象存入 Tauri 的状态管理器 (State)，
-            // 这样 commands::show_main_menu 才能通过参数拿到它
-            app.manage(m);
-
-            // 监听菜单点击事件，并分发给 menu.rs 里的处理函数
-            app.on_menu_event(move |app_handle, event| {
-                menu::handle_menu_event(app_handle, event);
-            });
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_always_on_top(true).unwrap();
+                window.set_resizable(false).unwrap();
+                window.set_decorations(false).unwrap();
+            }
 
             Ok(())
         })

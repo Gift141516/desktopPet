@@ -2,8 +2,7 @@
 // 导入 Tauri 菜单相关的核心组件
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    Runtime,
-    Emitter
+    Emitter, Runtime,
 };
 
 /// 创建原生上下文菜单
@@ -19,11 +18,13 @@ pub fn create_menu<R: Runtime>(app: &tauri::AppHandle<R>) -> tauri::Result<Menu<
     let sep = PredefinedMenuItem::separator(app)?;
 
     // 3. 创建退出菜单
+    let hide = MenuItem::with_id(app, "hide", "隐藏宠物", true, None::<&str>)?;
+
     let quit = MenuItem::with_id(app, "quit", "退出宠物", true, None::<&str>)?;
 
     // 4. 将所有创建好的菜单项组合成一个完整的菜单并返回
     // 注意：这里的数组顺序就是菜单显示的上下顺序
-    Menu::with_items(app, &[&weather, &chat, &sep, &quit])
+    Menu::with_items(app, &[&weather, &chat, &hide, &sep, &quit])
 }
 
 /// 处理菜单点击事件
@@ -44,6 +45,13 @@ pub fn handle_menu_event<R: Runtime>(app: &tauri::AppHandle<R>, event: tauri::me
             // 直接退出程序进程
             std::process::exit(0);
         }
+        "hide" => {
+            // 创建一个隐藏窗口
+            // let window = app.get_window("main").unwrap();
+            // window.hide().unwrap();
+            app.emit("menu-action", "hide").unwrap();
+        }
+
         _ => {
             // 匹配未定义的其他 ID，通常留空即可
         }
