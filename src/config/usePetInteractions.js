@@ -75,10 +75,6 @@ export function usePetInteractions() {
     //     }
     //     lastTap = now;
     // };
-    let audioContext = null;
-    let analyser = null;
-    let dataArray = null;
-    let animationId = null;
     // 增加一个参数 customUrl
     // usePetInteractions.js 核心修复部分
     const handleAction = async (onLipSync, customUrl = null) => {
@@ -165,8 +161,7 @@ export function usePetInteractions() {
             //         console.error("连接分析器或播放失败:", err);
             //     }
             // };
-            // 核心：在音频可以播放时再建立连接
-            audio.oncanplaythrough = async () => {
+            const setupPlayback = async () => {
                 try {
                     if (audioContext.state === 'suspended') {
                         await audioContext.resume();
@@ -180,10 +175,8 @@ export function usePetInteractions() {
 
                     const dataArray = new Uint8Array(analyser.frequencyBinCount);
 
-                    // 🌟 新增：记录上一帧的嘴型值，用于平滑过渡
                     let lastMouthValue = 0;
-                    let frameCount = 0; // 帧计数器，用来控制打印频率
-                    // 现在判断当前数值为155,解决了嘴巴一直张开的原因
+                    let frameCount = 0;
                     const volumeThreshold = 155;
 
                     const animate = () => {
@@ -204,18 +197,11 @@ export function usePetInteractions() {
                         if (frameCount % 10 === 0) {
                             console.log(`🔊 实时原始音量 (0-255): ${maxVolume}`);
                         }
-                        // 🌟 1. 动态底噪消除：把你那高达 150 的背景数值直接砍掉！
-                        // 只要声音小于 155，统统视为静音 (等于 0)
+
                         let adjustedVolume = Math.max(0, maxVolume - volumeThreshold);
-
-                        // 🌟 2. 精准张合度：砍掉底噪后，剩下的有效音量最高大概在 100 左右
-                        // 所以我们除以 80，让嘴巴能随着声音大小自然张合
                         let targetMouthValue = Math.min(adjustedVolume / 80, 1.0);
-
-                        // 3. 平滑过渡，像真人一样连贯
                         lastMouthValue = lastMouthValue + (targetMouthValue - lastMouthValue) * 0.4;
 
-                        // 4. 彻底归零保险
                         if (lastMouthValue < 0.05) {
                             lastMouthValue = 0;
                         }
@@ -224,18 +210,25 @@ export function usePetInteractions() {
                         requestAnimationFrame(animate);
                     };
 
-                    // 🌟 终极保险：监听音频原生的结束事件，强制闭嘴
                     audio.onended = () => {
                         onLipSync(0);
                     };
 
                     await audio.play();
                     animate();
-                    console.log("✅ 播放启动成功，平滑口型已开启");
+                    console.log("✅ 播放启动成功");
                 } catch (err) {
                     console.error("连接分析器或播放失败:", err);
                 }
             };
+
+            // 对于 Blob URL，数据已在内存中，使用 oncanplay 比 oncanplaythrough 快得多。
+            // 同时检测 readyState 防止事件在绑定前就已触发。
+            if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+                setupPlayback();
+            } else {
+                audio.oncanplay = setupPlayback;
+            }
 
             audio.onerror = () => {
                 console.error("音频加载失败，错误码:", audio.error.code);

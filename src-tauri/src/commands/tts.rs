@@ -43,6 +43,7 @@ pub async fn generate_tts<R: Runtime>(app: AppHandle<R>, text: String) -> Result
         format!("--vits-lexicon={}", lexicon.display()),
         format!("--vits-tokens={}", tokens.display()),
         "--sid=0".to_string(),
+        "--speed=1.5".to_string(),
         format!("--output-filename={}", output_path.display()),
         text,
     ]);
