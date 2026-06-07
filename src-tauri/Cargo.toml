@@ -23,4 +23,6 @@ tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"  # 新增：用于调用 tts-engine.exe
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["time"] }
+
 

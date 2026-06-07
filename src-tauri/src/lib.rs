@@ -28,7 +28,8 @@ pub fn run() {
             // 注意这里的路径：commands::模块名::函数名
             commands::tts::show_main_menu,
             commands::tts::generate_tts,
-            commands::window::toggle_side_status // 你新写的贴边指令
+            commands::window::toggle_side_status, // 你新写的贴边指令
+            commands::window::exit_app // 退出应用命令
         ])
         .setup(|app| {
             // --- 菜单初始化 ---

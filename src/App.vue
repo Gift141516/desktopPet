@@ -1,10 +1,13 @@
 <script setup>
 import { usePetInteractions } from './config/usePetInteractions';
 import Live2dViewer from "./views/Live2dViewer.vue";
+import ContextMenu from "./components/ContextMenu.vue";
 import { onMounted, ref, onUnmounted } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-const isSideHidden = ref(false); // 标记当前是否处于“贴边隐藏模式”
+// 侧边栏状态管理
+const isSideMode = ref(false);  // 是否启用侧边栏模式
+const isExpanded = ref(false);   // 在侧边栏模式下，当前是否展开
 const {
   handleDrag, startRecording,
   stopRecording, handleAction,
@@ -18,21 +21,24 @@ let startPos = { x: 0, y: 0 };
 let isDraggingTriggered = ref(false); // 标记是否已经开启了系统拖拽
 const isRecordingStatus = ref(false); // 新增：用于界面显示
 let unlistenMenu = null; // 存起来
+const contextMenuRef = ref(null); // 右键菜单组件引用
+
 // 右键事件
 const onRightClick = async (e) => {
-  // 1. 阻止浏览器默认的右键菜单（那个难看的网页菜单）
-  // 如果 Live2dViewer 内部没处理，这里必须调用
+  // 1. 阻止浏览器默认的右键菜单
   if (e.preventDefault) e.preventDefault();
-  // 🌟 核心破解：在弹出原生菜单之前，利用这次宝贵的网页点击，直接唤醒分析器！
+
+  // 🌟 核心破解：在弹出菜单之前，利用这次宝贵的网页点击，直接唤醒分析器！
   if (typeof unlockAudio === 'function') {
     unlockAudio();
   }
 
-  // 2. 弹出 Rust 原生菜单
-  try {
-    await invoke('show_main_menu');
-  } catch (err) {
-    console.error("弹出菜单失败:", err);
+  // 2. 显示自定义右键菜单
+  if (contextMenuRef.value) {
+    // 使用原生事件的坐标，如果是 PIXI 事件则使用 clientX/Y
+    const x = e.clientX || e.data?.global?.x || 0;
+    const y = e.clientY || e.data?.global?.y || 0;
+    contextMenuRef.value.show(x, y);
   }
 };
 const onDown = (e) => {
@@ -75,9 +81,17 @@ const onMove = (e) => {
   const dy = screenY - startPos.y;
 
   if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
-    console.log("检测到移动，触发拖拽", dx, dy); // 添加日志确认是否进入此逻辑
+    console.log("检测到移动，触发拖拽", dx, dy);
     isDraggingTriggered.value = true;
     clearTimeout(pressTimer);
+
+    // 🔥 关键修复：拖动时自动退出侧边栏模式
+    if (isSideMode.value) {
+      // 只更新状态，不重复调用后端（避免与展开动画冲突）
+      isSideMode.value = false;
+      isExpanded.value = false;
+    }
+
     handleDrag(e);
   }
 };
@@ -146,48 +160,68 @@ const onMenuWeather = async () => {
   }
 };
 // 核心逻辑：切换窗口侧边状态
-const toggleSide = async (hide) => {
-  isSideHidden.value = hide;
-  // 调用你新写的 commands::window::toggle_side_status 指令
-  // 注意参数名要和 Rust 里的变量名对应（如果是驼峰转下划线，Rust 侧是 is_hide）
-  await invoke("toggle_side_status", { isHide: hide });
-};
-
-// 鼠标划入：如果在侧边，就展开显示
-const onMouseEnter = async () => {
-  if (isSideHidden.value) {
-    console.log("鼠标进入边缘，展开窗口");
-    await toggleSide(false); // 展开
-    isSideHidden.value = true; // 但模式依然是侧边模式，方便划出时再次收起
+const toggleSide = async (enable) => {
+  isSideMode.value = enable;
+  if (enable) {
+    // 启用侧边栏模式：收缩到边缘
+    isExpanded.value = false;
+    await invoke("toggle_side_status", { isHide: true });
+  } else {
+    // 禁用侧边栏模式：完全展开
+    isExpanded.value = false;
+    await invoke("toggle_side_status", { isHide: false });
   }
 };
 
-// 鼠标划出：如果在侧边模式，就收缩回去
-const onMouseLeave = async () => {
-  if (isSideHidden.value) {
-    console.log("鼠标离开，收缩窗口");
-    await toggleSide(true);
+// 鼠标划入标签：展开窗口
+const onTabEnter = async () => {
+  console.log("鼠标进入标签，展开窗口");
+  isExpanded.value = true;
+  await invoke("toggle_side_status", { isHide: false });
+};
+
+// 鼠标离开内容区：收缩窗口
+const onContentLeave = async () => {
+  if (isSideMode.value && isExpanded.value) {
+    console.log("鼠标离开内容，收缩窗口");
+    isExpanded.value = false;
+    await invoke("toggle_side_status", { isHide: true });
   }
 };
 
 
 onMounted(async () => {
-  unlistenMenu = await listen('menu-action', async (event) => {
-    const action = event.payload; // 这就是 menu.rs 里 emit 的 "weather" 或 "chat"
-
-    if (action === 'weather') {
-      console.log("用户点击了：今天天气怎么样");
-      // 这里写你的天气逻辑，比如：
-      // handleWeatherAction();
-      onMenuWeather();
-    } else if (action === 'chat') {
-      console.log("用户点击了：陪我聊聊天");
-    } else if (action === 'hide') {
-      console.log("执行隐藏到侧边");
-      await toggleSide(true);
-    }
-  });
+  // 不再需要监听 Rust 菜单事件，因为现在使用自定义菜单
+  // unlistenMenu = await listen('menu-action', async (event) => {
+  //   const action = event.payload;
+  //   if (action === 'weather') {
+  //     console.log("用户点击了：今天天气怎么样");
+  //     onMenuWeather();
+  //   } else if (action === 'chat') {
+  //     console.log("用户点击了：陪我聊聊天");
+  //   } else if (action === 'hide') {
+  //     console.log("执行隐藏到侧边");
+  //     await toggleSide(true);
+  //   }
+  // });
 });
+
+// 处理自定义菜单的点击事件
+const handleMenuAction = async (action) => {
+  if (action === 'weather') {
+    console.log("用户点击了：今天天气怎么样");
+    await onMenuWeather();
+  } else if (action === 'chat') {
+    console.log("用户点击了：陪我聊聊天");
+  } else if (action === 'hide') {
+    console.log("执行隐藏到侧边");
+    await toggleSide(true);
+  } else if (action === 'quit') {
+    console.log("退出程序");
+    await invoke('exit_app');
+  }
+};
+
 onUnmounted(() => {
   // 组件销毁时，注销监听，防止重复触发
   if (unlistenMenu) unlistenMenu();
@@ -195,10 +229,27 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="main-app" @mouseenter="onMouseEnter" @mouseleave="onMouseLeave">
-    <Live2dViewer ref="viewerRef" modelPath="model/runtime/kei_basic_free.model3.json" @pointerover="onPointerOver"
-      @pointerout="onPointerOut" @pointerdown="onDown" @pointermove="onMove" @pointerup="onUp"
-      @contextmenu="onRightClick" />
+  <div class="main-app">
+    <!-- 吸附标签：只在侧边栏模式且未展开时显示 -->
+    <div
+      v-if="isSideMode && !isExpanded"
+      class="edge-tab"
+      @mouseenter="onTabEnter">
+      <div class="tab-icon">👻</div>
+    </div>
+
+    <!-- 主内容区 -->
+    <div
+      class="content-area"
+      :class="{ 'is-hidden': isSideMode && !isExpanded }"
+      @mouseleave="onContentLeave">
+      <Live2dViewer ref="viewerRef" modelPath="model/runtime/kei_basic_free.model3.json" @pointerover="onPointerOver"
+        @pointerout="onPointerOut" @pointerdown="onDown" @pointermove="onMove" @pointerup="onUp"
+        @contextmenu="onRightClick" />
+
+      <!-- 自定义右键菜单 -->
+      <ContextMenu ref="contextMenuRef" @menu-action="handleMenuAction" />
+    </div>
   </div>
 </template>
 
@@ -243,5 +294,53 @@ body,
 .main-app {
   width: 100%;
   height: 100%;
+  position: relative;
+}
+
+/* 吸附标签样式 */
+.edge-tab {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 80px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 0 8px 8px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  pointer-events: auto;
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.2);
+  transition: all 0.3s ease;
+  z-index: 9999;
+}
+
+.edge-tab:hover {
+  width: 35px;
+  box-shadow: 4px 0 12px rgba(0, 0, 0, 0.3);
+}
+
+.tab-icon {
+  font-size: 24px;
+  animation: float 2s ease-in-out infinite;
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+
+/* 内容区域 */
+.content-area {
+  width: 100%;
+  height: 100%;
+  transition: opacity 0.2s ease;
+}
+
+.content-area.is-hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 </style>
