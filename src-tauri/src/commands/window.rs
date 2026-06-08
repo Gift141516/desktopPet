@@ -4,21 +4,39 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 #[tauri::command]
-pub async fn toggle_side_status<R: Runtime>(window: WebviewWindow<R>, is_hide: bool) {
+pub async fn toggle_side_status<R: Runtime>(
+    window: WebviewWindow<R>,
+    is_hide: bool,
+    edge: Option<String>, // "left" | "right" | "top" | "bottom"
+) {
     if let Ok(Some(monitor)) = window.current_monitor() {
         let screen_size = monitor.size();
         let window_size = window.outer_size().unwrap();
+        let current_pos = window.outer_position().unwrap();
 
-        let start_x = window.outer_position().unwrap().x;
-        let target_x = if is_hide {
-            // 隐藏：整个窗口移出屏幕，只露出 30 像素（给标签用）
-            screen_size.width as i32 - 30
+        let edge = edge.as_deref().unwrap_or("right"); // 默认右边
+        let tab_size = 30; // 标签露出的尺寸
+
+        let (start_x, start_y) = (current_pos.x, current_pos.y);
+        let (target_x, target_y) = if is_hide {
+            // 隐藏：根据边缘方向移出屏幕
+            match edge {
+                "left" => (-(window_size.width as i32) + tab_size, current_pos.y),
+                "right" => (screen_size.width as i32 - tab_size, current_pos.y),
+                "top" => (current_pos.x, -(window_size.height as i32) + tab_size),
+                "bottom" => (current_pos.x, screen_size.height as i32 - tab_size),
+                _ => (screen_size.width as i32 - tab_size, current_pos.y), // 默认右边
+            }
         } else {
-            // 展开：完全显示
-            screen_size.width as i32 - window_size.width as i32
+            // 展开：根据边缘方向完全显示
+            match edge {
+                "left" => (0, current_pos.y),
+                "right" => (screen_size.width as i32 - window_size.width as i32, current_pos.y),
+                "top" => (current_pos.x, 0),
+                "bottom" => (current_pos.x, screen_size.height as i32 - window_size.height as i32),
+                _ => (screen_size.width as i32 - window_size.width as i32, current_pos.y),
+            }
         };
-
-        let y = (screen_size.height as i32 - window_size.height as i32) / 2;
 
         // 快速平滑滑动：分 15 帧，每帧 10ms（约 150ms 总时长）
         let frames = 15;
@@ -30,13 +48,14 @@ pub async fn toggle_side_status<R: Runtime>(window: WebviewWindow<R>, is_hide: b
             let eased_progress = 1.0 - (1.0 - progress).powi(3);
 
             let current_x = start_x + ((target_x - start_x) as f64 * eased_progress) as i32;
-            let _ = window.set_position(PhysicalPosition::new(current_x, y));
+            let current_y = start_y + ((target_y - start_y) as f64 * eased_progress) as i32;
+            let _ = window.set_position(PhysicalPosition::new(current_x, current_y));
 
             sleep(Duration::from_millis(duration_per_frame)).await;
         }
 
         // 确保最终到达目标位置
-        let _ = window.set_position(PhysicalPosition::new(target_x, y));
+        let _ = window.set_position(PhysicalPosition::new(target_x, target_y));
     }
 }
 

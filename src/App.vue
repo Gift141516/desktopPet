@@ -2,12 +2,21 @@
 import { usePetInteractions } from './config/usePetInteractions';
 import Live2dViewer from "./views/Live2dViewer.vue";
 import ContextMenu from "./components/ContextMenu.vue";
-import { onMounted, ref, onUnmounted } from "vue";
+import { onMounted, ref, onUnmounted, onBeforeUnmount } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { currentMonitor } from "@tauri-apps/api/window";
 // 侧边栏状态管理
 const isSideMode = ref(false);  // 是否启用侧边栏模式
 const isExpanded = ref(false);   // 在侧边栏模式下，当前是否展开
+const currentEdge = ref("right"); // 当前吸附的边缘：left/right/top/bottom
+let mouseInContent = false; // 🔥 鼠标是否真正进入了内容区
+let isWindowMoving = false; // 🔥 窗口是否正在移动中
+let pendingCollapse = false; // 🔥 窗口移动期间是否有待处理的收缩请求
+let isProgrammaticOperation = false; // 🔥 标记程序触发的窗口操作（vs 用户拖拽）
+let collapseTimer = null; // 🔥 收缩延迟定时器
+let isExpanding = false; // 🔥 标记正在展开中（展开保护期）
 const {
   handleDrag, startRecording,
   stopRecording, handleAction,
@@ -103,7 +112,10 @@ const onUp = async () => {
   startTimestamp = 0; // 重置
 
   if (isDraggingTriggered.value) {
-    // 如果已经触发了拖拽，系统会接管 mouseup，这里的逻辑可能不会执行
+    // 拖拽结束，检查是否需要自动吸附到边缘
+    console.log("🔥 拖拽结束，开始检查自动吸附...");
+    await checkAutoEdgeDock();
+    isDraggingTriggered.value = false;
     return;
   }
 
@@ -159,51 +171,234 @@ const onMenuWeather = async () => {
     console.error("语音生成失败:", err);
   }
 };
+
+// 🔥 智能边缘吸附检测
+const checkAutoEdgeDock = async () => {
+  try {
+    const currentWindow = getCurrentWindow();
+
+    // 获取窗口位置和屏幕尺寸
+    const position = await currentWindow.outerPosition();
+    const size = await currentWindow.outerSize();
+    const monitor = await currentMonitor();
+
+    console.log("📍 当前窗口位置:", position);
+    console.log("📐 窗口尺寸:", size);
+    console.log("🖥️ 屏幕尺寸:", monitor?.size);
+
+    if (!monitor) {
+      console.warn("⚠️ 无法获取显示器信息");
+      return;
+    }
+
+    const screenWidth = monitor.size.width;
+    const screenHeight = monitor.size.height;
+    const halfWidth = size.width * 0.5;
+    const halfHeight = size.height * 0.5;
+
+    console.log(`🎯 检测阈值: halfWidth=${halfWidth}, halfHeight=${halfHeight}`);
+
+    // 判断靠近哪个边缘（一半在屏幕外就吸附）
+    let edge = null;
+
+    if (position.x < -halfWidth) {
+      // 左边缘：窗口左边界移出屏幕超过一半宽度
+      edge = "left";
+      console.log(`✅ 触发左边缘: position.x(${position.x}) < -halfWidth(${-halfWidth})`);
+    } else if (position.x > screenWidth - halfWidth) {
+      // 右边缘：窗口左边界超过屏幕右边界 - 一半宽度
+      edge = "right";
+      console.log(`✅ 触发右边缘: position.x(${position.x}) > screenWidth - halfWidth(${screenWidth - halfWidth})`);
+    } else if (position.y < -halfHeight) {
+      // 上边缘：窗口上边界移出屏幕超过一半高度
+      edge = "top";
+      console.log(`✅ 触发上边缘: position.y(${position.y}) < -halfHeight(${-halfHeight})`);
+    } else if (position.y > screenHeight - halfHeight) {
+      // 下边缘：窗口上边界超过屏幕下边界 - 一半高度
+      edge = "bottom";
+      console.log(`✅ 触发下边缘: position.y(${position.y}) > screenHeight - halfHeight(${screenHeight - halfHeight})`);
+    } else {
+      console.log("❌ 未触发任何边缘");
+    }
+
+    if (edge) {
+      console.log(`🎉 检测到靠近 ${edge} 边缘，自动吸附`);
+      currentEdge.value = edge;
+      isSideMode.value = true;
+      isExpanded.value = false;
+      await invoke("toggle_side_status", { isHide: true, edge });
+    }
+  } catch (err) {
+    console.error("边缘检测失败:", err);
+  }
+};
+
 // 核心逻辑：切换窗口侧边状态
 const toggleSide = async (enable) => {
   isSideMode.value = enable;
   if (enable) {
     // 启用侧边栏模式：收缩到边缘
     isExpanded.value = false;
-    await invoke("toggle_side_status", { isHide: true });
+    await invoke("toggle_side_status", { isHide: true, edge: currentEdge.value });
   } else {
     // 禁用侧边栏模式：完全展开
     isExpanded.value = false;
-    await invoke("toggle_side_status", { isHide: false });
+    await invoke("toggle_side_status", { isHide: false, edge: currentEdge.value });
   }
 };
 
 // 鼠标划入标签：展开窗口
 const onTabEnter = async () => {
-  console.log("鼠标进入标签，展开窗口");
+  console.log("🟢 [1] 标签 mouseenter - 开始展开");
+  console.log(`   当前状态: isExpanded=${isExpanded.value}, mouseInContent=${mouseInContent}`);
+
+  // 🔥 清除收缩定时器（鼠标回来了）
+  if (collapseTimer) {
+    console.log("🚫 取消收缩定时器");
+    clearTimeout(collapseTimer);
+    collapseTimer = null;
+  }
+
+  mouseInContent = false; // 🔥 重置标记（还没进入内容区）
   isExpanded.value = true;
-  await invoke("toggle_side_status", { isHide: false });
+
+  // 🔥 进入展开保护期
+  isExpanding = true;
+
+  // 🔥 标记程序操作开始
+  isProgrammaticOperation = true;
+  await invoke("toggle_side_status", { isHide: false, edge: currentEdge.value });
+
+  // 🔥 等待展开动画完全完成（800ms = 动画时长 + 缓冲）
+  setTimeout(() => {
+    isProgrammaticOperation = false;
+    isExpanding = false; // 🔥 解除展开保护期
+    console.log("🟢 [2] 标签展开完成，解除保护期");
+  }, 800);
+};
+
+// 🔥 鼠标进入内容区：允许后续收缩
+const onContentEnter = () => {
+  console.log("🔵 [3] 内容区 mouseenter - 允许收缩");
+  console.log(`   当前状态: isExpanded=${isExpanded.value}, mouseInContent=${mouseInContent}`);
+
+  // 🔥 清除收缩定时器（鼠标回来了）
+  if (collapseTimer) {
+    console.log("🚫 取消收缩定时器");
+    clearTimeout(collapseTimer);
+    collapseTimer = null;
+  }
+
+  mouseInContent = true;
 };
 
 // 鼠标离开内容区：收缩窗口
 const onContentLeave = async () => {
+  console.log("🔴 [4] 内容区 mouseleave - 尝试收缩");
+  console.log(`   当前状态: isSideMode=${isSideMode.value}, isExpanded=${isExpanded.value}, mouseInContent=${mouseInContent}, isWindowMoving=${isWindowMoving}, isExpanding=${isExpanding}`);
+
+  // 🔥 展开保护期内，直接忽略所有收缩请求
+  if (isExpanding) {
+    console.log("🚫 正在展开中，忽略收缩");
+    return;
+  }
+
+  // 🔥 窗口移动期间记录待处理的收缩请求（只有展开状态才需要延迟收缩）
+  if (isWindowMoving && isExpanded.value) {
+    console.log("🚫 窗口正在移动，延迟收缩请求");
+    pendingCollapse = true;
+    return;
+  }
+
   if (isSideMode.value && isExpanded.value) {
-    console.log("鼠标离开内容，收缩窗口");
-    isExpanded.value = false;
-    await invoke("toggle_side_status", { isHide: true });
+    // 🔥 只有鼠标真正进入过内容区，才允许收缩
+    if (!mouseInContent) {
+      console.log("🚫 鼠标从未进入内容区，忽略收缩请求");
+      return;
+    }
+
+    // 🔥 清除之前的定时器
+    if (collapseTimer) clearTimeout(collapseTimer);
+
+    // 🔥 延迟200ms收缩，避免鼠标快速划过时抖动
+    collapseTimer = setTimeout(async () => {
+      console.log("✅ 执行收缩");
+      isExpanded.value = false;
+      mouseInContent = false; // 重置标记
+      pendingCollapse = false; // 清除待处理标记
+
+      // 🔥 标记程序操作开始
+      isProgrammaticOperation = true;
+      await invoke("toggle_side_status", { isHide: true, edge: currentEdge.value });
+
+      // 🔥 等待后端操作完成
+      setTimeout(() => {
+        isProgrammaticOperation = false;
+        console.log("✅ 收缩完成，解除程序操作标记");
+      }, 500);
+    }, 200);
   }
 };
 
 
+let moveEndTimer = null; // 用于检测窗口移动结束
+let unlistenMove = null; // 🔥 保存 unlisten 函数，用于清理监听器
+
 onMounted(async () => {
-  // 不再需要监听 Rust 菜单事件，因为现在使用自定义菜单
-  // unlistenMenu = await listen('menu-action', async (event) => {
-  //   const action = event.payload;
-  //   if (action === 'weather') {
-  //     console.log("用户点击了：今天天气怎么样");
-  //     onMenuWeather();
-  //   } else if (action === 'chat') {
-  //     console.log("用户点击了：陪我聊聊天");
-  //   } else if (action === 'hide') {
-  //     console.log("执行隐藏到侧边");
-  //     await toggleSide(true);
-  //   }
-  // });
+  // 监听窗口位置变化
+  unlistenMove = await listen('tauri://move', async (event) => {
+    // 🔥 如果是程序触发的窗口操作，直接忽略（不进入防抖逻辑）
+    if (isProgrammaticOperation) {
+      console.log("🚫 程序操作触发的move事件，忽略");
+      return;
+    }
+
+    console.log("🚚 用户拖拽窗口，进入移动检测");
+    isWindowMoving = true; // 🔥 标记窗口正在移动
+
+    // 清除之前的定时器
+    if (moveEndTimer) clearTimeout(moveEndTimer);
+
+    // 300ms 没有新的移动事件就认为移动结束
+    moveEndTimer = setTimeout(async () => {
+      console.log("🛑 窗口移动结束，检查自动吸附");
+      isWindowMoving = false; // 🔥 移动结束
+      await checkAutoEdgeDock();
+
+      // 🔥 如果移动期间有待处理的收缩请求，现在执行（确保窗口还是展开状态）
+      if (pendingCollapse && mouseInContent && isExpanded.value) {
+        console.log("⏳ 执行延迟的收缩请求");
+        pendingCollapse = false;
+        isExpanded.value = false;
+        mouseInContent = false;
+
+        // 🔥 标记程序操作
+        isProgrammaticOperation = true;
+        await invoke("toggle_side_status", { isHide: true, edge: currentEdge.value });
+
+        setTimeout(() => {
+          isProgrammaticOperation = false;
+          console.log("✅ 延迟收缩完成，解除程序操作标记");
+        }, 500);
+      }
+    }, 300);
+  });
+});
+
+onBeforeUnmount(() => {
+  // 🔥 清理事件监听器，防止热更新时重复注册
+  if (unlistenMove) {
+    unlistenMove();
+    unlistenMove = null;
+  }
+  if (moveEndTimer) {
+    clearTimeout(moveEndTimer);
+    moveEndTimer = null;
+  }
+  if (collapseTimer) {
+    clearTimeout(collapseTimer);
+    collapseTimer = null;
+  }
 });
 
 // 处理自定义菜单的点击事件
@@ -215,6 +410,34 @@ const handleMenuAction = async (action) => {
     console.log("用户点击了：陪我聊聊天");
   } else if (action === 'hide') {
     console.log("执行隐藏到侧边");
+    // 🔥 修复：获取当前窗口位置，判断最近的边缘
+    const currentWindow = getCurrentWindow();
+    const position = await currentWindow.outerPosition();
+    const monitor = await currentMonitor();
+
+    if (monitor) {
+      const screenWidth = monitor.size.width;
+      const screenHeight = monitor.size.height;
+
+      // 判断窗口中心点靠近哪个边缘
+      const centerX = position.x + 225; // 窗口宽度 450 / 2
+      const centerY = position.y + 300; // 窗口高度 600 / 2
+
+      const distToLeft = centerX;
+      const distToRight = screenWidth - centerX;
+      const distToTop = centerY;
+      const distToBottom = screenHeight - centerY;
+
+      const minDist = Math.min(distToLeft, distToRight, distToTop, distToBottom);
+
+      if (minDist === distToLeft) currentEdge.value = "left";
+      else if (minDist === distToRight) currentEdge.value = "right";
+      else if (minDist === distToTop) currentEdge.value = "top";
+      else currentEdge.value = "bottom";
+
+      console.log(`最近边缘：${currentEdge.value}`);
+    }
+
     await toggleSide(true);
   } else if (action === 'quit') {
     console.log("退出程序");
@@ -234,6 +457,7 @@ onUnmounted(() => {
     <div
       v-if="isSideMode && !isExpanded"
       class="edge-tab"
+      :class="[`edge-${currentEdge}`]"
       @mouseenter="onTabEnter">
       <div class="tab-icon">👻</div>
     </div>
@@ -242,6 +466,7 @@ onUnmounted(() => {
     <div
       class="content-area"
       :class="{ 'is-hidden': isSideMode && !isExpanded }"
+      @mouseenter="onContentEnter"
       @mouseleave="onContentLeave">
       <Live2dViewer ref="viewerRef" modelPath="model/runtime/kei_basic_free.model3.json" @pointerover="onPointerOver"
         @pointerout="onPointerOut" @pointerdown="onDown" @pointermove="onMove" @pointerup="onUp"
@@ -300,26 +525,78 @@ body,
 /* 吸附标签样式 */
 .edge-tab {
   position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 30px;
-  height: 80px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  border-radius: 0 8px 8px 0;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   pointer-events: auto;
-  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.2);
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   transition: all 0.3s ease;
   z-index: 9999;
 }
 
-.edge-tab:hover {
+/* 左边缘：标签在窗口右侧（靠近屏幕内） */
+.edge-tab.edge-left {
+  right: 0;  /* 🔥 修复：改为 right，标签才能在屏幕内可见 */
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 80px;
+  border-radius: 0 8px 8px 0;
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.2);
+}
+
+.edge-tab.edge-left:hover {
   width: 35px;
   box-shadow: 4px 0 12px rgba(0, 0, 0, 0.3);
+}
+
+/* 右边缘：标签在窗口左侧（靠近屏幕内） */
+.edge-tab.edge-right {
+  left: 0;  /* 🔥 修复：改为 left，标签才能在屏幕内可见 */
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 80px;
+  border-radius: 8px 0 0 8px;
+  box-shadow: -2px 0 8px rgba(0, 0, 0, 0.2);
+}
+
+.edge-tab.edge-right:hover {
+  width: 35px;
+  box-shadow: -4px 0 12px rgba(0, 0, 0, 0.3);
+}
+
+/* 上边缘：标签在窗口下侧（靠近屏幕内） */
+.edge-tab.edge-top {
+  left: 50%;
+  bottom: 0;  /* 🔥 修复：改为 bottom，标签才能在屏幕内可见 */
+  transform: translateX(-50%);
+  width: 80px;
+  height: 30px;
+  border-radius: 0 0 8px 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.edge-tab.edge-top:hover {
+  height: 35px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* 下边缘：标签在窗口上侧（靠近屏幕内） */
+.edge-tab.edge-bottom {
+  left: 50%;
+  top: 0;  /* 🔥 修复：改为 top，标签才能在屏幕内可见 */
+  transform: translateX(-50%);
+  width: 80px;
+  height: 30px;
+  border-radius: 8px 8px 0 0;
+  box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.edge-tab.edge-bottom:hover {
+  height: 35px;
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.3);
 }
 
 .tab-icon {
@@ -336,7 +613,10 @@ body,
 .content-area {
   width: 100%;
   height: 100%;
-  transition: opacity 0.2s ease;
+  transition: opacity 0.8s ease; /* 🔥 改为 0.8s，匹配后端 800ms 展开时长 */
+  will-change: opacity; /* 🔥 GPU 加速，减少重绘开销 */
+  transform: translateZ(0); /* 🔥 强制 GPU 合成 */
+  pointer-events: auto; /* 🔥 确保可以接收鼠标事件（mouseleave） */
 }
 
 .content-area.is-hidden {
