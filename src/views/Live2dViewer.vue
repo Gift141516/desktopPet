@@ -77,7 +77,8 @@ const lipSync = (targetValue) => {
     const effectiveValue = targetValue < 0.01 ? 0 : targetValue;
 
     // 提高平滑度，防止突兀
-    const lerp = 0.3;
+    // Keep this layer light; audio-side smoothing already handles most jitter.
+    const lerp = effectiveValue > lastMouthValue ? 0.75 : 0.9;
     const smoothedValue = lastMouthValue + (effectiveValue - lastMouthValue) * lerp;
     lastMouthValue = smoothedValue;
 

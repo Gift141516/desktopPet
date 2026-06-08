@@ -3,6 +3,15 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 // 保持在外部作用域，确保全局唯一
 let audioContext = null;
+
+const LIP_SYNC_CONFIG = {
+    volumeThreshold: 150,
+    volumeRange: 110,
+    maxMouthOpen: 0.55,
+    attackSmoothing: 0.65,
+    releaseSmoothing: 0.85,
+    silenceCutoff: 0.035,
+};
 export function usePetInteractions() {
     const appWindow = getCurrentWindow();
     const savedAudioUrl = ref(null);
@@ -194,7 +203,6 @@ export function usePetInteractions() {
 
                     let lastMouthValue = 0;
                     let frameCount = 0;
-                    const volumeThreshold = 155;
 
                     const animate = () => {
                         if (audio.paused || audio.ended) {
@@ -215,11 +223,15 @@ export function usePetInteractions() {
                             console.log(`🔊 实时原始音量 (0-255): ${maxVolume}`);
                         }
 
-                        let adjustedVolume = Math.max(0, maxVolume - volumeThreshold);
-                        let targetMouthValue = Math.min(adjustedVolume / 80, 1.0);
-                        lastMouthValue = lastMouthValue + (targetMouthValue - lastMouthValue) * 0.4;
+                        const adjustedVolume = Math.max(0, maxVolume - LIP_SYNC_CONFIG.volumeThreshold);
+                        const normalizedVolume = Math.min(adjustedVolume / LIP_SYNC_CONFIG.volumeRange, 1);
+                        const targetMouthValue = normalizedVolume * LIP_SYNC_CONFIG.maxMouthOpen;
+                        const smoothing = targetMouthValue > lastMouthValue
+                            ? LIP_SYNC_CONFIG.attackSmoothing
+                            : LIP_SYNC_CONFIG.releaseSmoothing;
+                        lastMouthValue = lastMouthValue + (targetMouthValue - lastMouthValue) * smoothing;
 
-                        if (lastMouthValue < 0.05) {
+                        if (lastMouthValue < LIP_SYNC_CONFIG.silenceCutoff) {
                             lastMouthValue = 0;
                         }
 
