@@ -13,11 +13,63 @@ const isExpanded = ref(false);   // 在侧边栏模式下，当前是否展开
 const currentEdge = ref("right"); // 当前吸附的边缘：left/right/top/bottom
 const ENABLE_AUTO_EDGE_DOCK = false;
 let mouseInContent = false; // 🔥 鼠标是否真正进入了内容区
+let pointerInContent = false;
+let isContextMenuOpen = false;
+let isPointerInContextMenu = false;
 let isWindowMoving = false; // 🔥 窗口是否正在移动中
 let pendingCollapse = false; // 🔥 窗口移动期间是否有待处理的收缩请求
 let isProgrammaticOperation = false; // 🔥 标记程序触发的窗口操作（vs 用户拖拽）
 let collapseTimer = null; // 🔥 收缩延迟定时器
+let menuCollapseTimer = null;
 let isExpanding = false; // 🔥 标记正在展开中（展开保护期）
+
+const clearCollapseTimer = () => {
+  if (collapseTimer) {
+    clearTimeout(collapseTimer);
+    collapseTimer = null;
+  }
+};
+
+const clearMenuCollapseTimer = () => {
+  if (menuCollapseTimer) {
+    clearTimeout(menuCollapseTimer);
+    menuCollapseTimer = null;
+  }
+};
+
+const collapseToSide = async () => {
+  if (!isSideMode.value || !isExpanded.value) return;
+
+  console.log("✅ 执行收缩");
+  clearMenuCollapseTimer();
+  contextMenuRef.value?.closeMenu();
+  isContextMenuOpen = false;
+  isPointerInContextMenu = false;
+  isExpanded.value = false;
+  mouseInContent = false;
+  pointerInContent = false;
+  pendingCollapse = false;
+
+  isProgrammaticOperation = true;
+  try {
+    await invoke("toggle_side_status", { isHide: true, edge: currentEdge.value });
+  } finally {
+    setTimeout(() => {
+      isProgrammaticOperation = false;
+      console.log("✅ 收缩完成，解除程序操作标记");
+    }, 500);
+  }
+};
+
+const scheduleCollapse = (delay = 200, requireMouseInContent = true) => {
+  clearCollapseTimer();
+  collapseTimer = setTimeout(async () => {
+    collapseTimer = null;
+    if (isContextMenuOpen) return;
+    if (requireMouseInContent && !mouseInContent) return;
+    await collapseToSide();
+  }, delay);
+};
 const {
   handleDrag, startRecording,
   stopRecording, handleAction,
@@ -33,6 +85,50 @@ const isRecordingStatus = ref(false); // 新增：用于界面显示
 let unlistenMenu = null; // 存起来
 const contextMenuRef = ref(null); // 右键菜单组件引用
 
+const handleContextMenuOpen = () => {
+  isContextMenuOpen = true;
+  isPointerInContextMenu = false;
+  mouseInContent = true;
+  pointerInContent = true;
+  clearCollapseTimer();
+  clearMenuCollapseTimer();
+};
+
+const handleContextMenuClose = () => {
+  isContextMenuOpen = false;
+  isPointerInContextMenu = false;
+  clearMenuCollapseTimer();
+  if (isSideMode.value && isExpanded.value && !pointerInContent) {
+    scheduleCollapse(200, false);
+  }
+};
+
+const scheduleMenuCloseAndCollapse = (delay = 250) => {
+  clearMenuCollapseTimer();
+  menuCollapseTimer = setTimeout(async () => {
+    menuCollapseTimer = null;
+    if (!isContextMenuOpen || isPointerInContextMenu || pointerInContent) return;
+
+    contextMenuRef.value?.closeMenu();
+    isContextMenuOpen = false;
+    isPointerInContextMenu = false;
+    await collapseToSide();
+  }, delay);
+};
+
+const handleContextMenuEnter = () => {
+  isPointerInContextMenu = true;
+  clearMenuCollapseTimer();
+  clearCollapseTimer();
+};
+
+const handleContextMenuLeave = () => {
+  isPointerInContextMenu = false;
+  if (isSideMode.value && isExpanded.value && !pointerInContent) {
+    scheduleMenuCloseAndCollapse(250);
+  }
+};
+
 // 右键事件
 const onRightClick = async (e) => {
   // 1. 阻止浏览器默认的右键菜单
@@ -45,9 +141,10 @@ const onRightClick = async (e) => {
 
   // 2. 显示自定义右键菜单
   if (contextMenuRef.value) {
+    handleContextMenuOpen();
     // 使用原生事件的坐标，如果是 PIXI 事件则使用 clientX/Y
-    const x = e.clientX || e.data?.global?.x || 0;
-    const y = e.clientY || e.data?.global?.y || 0;
+    const x = e.clientX ?? e.data?.global?.x ?? 0;
+    const y = e.clientY ?? e.data?.global?.y ?? 0;
     contextMenuRef.value.show(x, y);
   }
 };
@@ -267,11 +364,7 @@ const onTabEnter = async () => {
   console.log(`   当前状态: isExpanded=${isExpanded.value}, mouseInContent=${mouseInContent}`);
 
   // 🔥 清除收缩定时器（鼠标回来了）
-  if (collapseTimer) {
-    console.log("🚫 取消收缩定时器");
-    clearTimeout(collapseTimer);
-    collapseTimer = null;
-  }
+  clearCollapseTimer();
 
   mouseInContent = false; // 🔥 重置标记（还没进入内容区）
   isExpanded.value = true;
@@ -288,6 +381,9 @@ const onTabEnter = async () => {
     isProgrammaticOperation = false;
     isExpanding = false; // 🔥 解除展开保护期
     console.log("🟢 [2] 标签展开完成，解除保护期");
+    if (isSideMode.value && isExpanded.value) {
+      scheduleCollapse(700, false);
+    }
   }, 800);
 };
 
@@ -296,14 +392,24 @@ const onContentEnter = () => {
   console.log("🔵 [3] 内容区 mouseenter - 允许收缩");
   console.log(`   当前状态: isExpanded=${isExpanded.value}, mouseInContent=${mouseInContent}`);
 
+  if (isExpanding) return;
+
+  pointerInContent = true;
+
   // 🔥 清除收缩定时器（鼠标回来了）
-  if (collapseTimer) {
-    console.log("🚫 取消收缩定时器");
-    clearTimeout(collapseTimer);
-    collapseTimer = null;
-  }
+  clearCollapseTimer();
 
   mouseInContent = true;
+};
+
+const onContentMove = () => {
+  if (!isSideMode.value || !isExpanded.value || isExpanding) return;
+
+  pointerInContent = true;
+  if (!mouseInContent) {
+    mouseInContent = true;
+  }
+  clearCollapseTimer();
 };
 
 // 鼠标离开内容区：收缩窗口
@@ -314,6 +420,14 @@ const onContentLeave = async () => {
   // 🔥 展开保护期内，直接忽略所有收缩请求
   if (isExpanding) {
     console.log("🚫 正在展开中，忽略收缩");
+    return;
+  }
+
+  pointerInContent = false;
+
+  if (isContextMenuOpen) {
+    console.log("🚫 右键菜单打开中，等待菜单 hover 状态");
+    scheduleMenuCloseAndCollapse(250);
     return;
   }
 
@@ -331,26 +445,8 @@ const onContentLeave = async () => {
       return;
     }
 
-    // 🔥 清除之前的定时器
-    if (collapseTimer) clearTimeout(collapseTimer);
-
     // 🔥 延迟200ms收缩，避免鼠标快速划过时抖动
-    collapseTimer = setTimeout(async () => {
-      console.log("✅ 执行收缩");
-      isExpanded.value = false;
-      mouseInContent = false; // 重置标记
-      pendingCollapse = false; // 清除待处理标记
-
-      // 🔥 标记程序操作开始
-      isProgrammaticOperation = true;
-      await invoke("toggle_side_status", { isHide: true, edge: currentEdge.value });
-
-      // 🔥 等待后端操作完成
-      setTimeout(() => {
-        isProgrammaticOperation = false;
-        console.log("✅ 收缩完成，解除程序操作标记");
-      }, 500);
-    }, 200);
+    scheduleCollapse(200, true);
   }
 };
 
@@ -389,6 +485,7 @@ onMounted(async () => {
         pendingCollapse = false;
         isExpanded.value = false;
         mouseInContent = false;
+        pointerInContent = false;
 
         // 🔥 标记程序操作
         isProgrammaticOperation = true;
@@ -417,6 +514,7 @@ onBeforeUnmount(() => {
     clearTimeout(collapseTimer);
     collapseTimer = null;
   }
+  clearMenuCollapseTimer();
 });
 
 // 处理自定义菜单的点击事件
@@ -486,13 +584,20 @@ onUnmounted(() => {
       class="content-area"
       :class="{ 'is-hidden': isSideMode && !isExpanded }"
       @mouseenter="onContentEnter"
+      @mousemove="onContentMove"
       @mouseleave="onContentLeave">
       <Live2dViewer ref="viewerRef" modelPath="model/runtime/kei_basic_free.model3.json" @pointerover="onPointerOver"
         @pointerout="onPointerOut" @pointerdown="onDown" @pointermove="onMove" @pointerup="onUp"
         @contextmenu="onRightClick" />
 
       <!-- 自定义右键菜单 -->
-      <ContextMenu ref="contextMenuRef" @menu-action="handleMenuAction" />
+      <ContextMenu
+        ref="contextMenuRef"
+        @menu-action="handleMenuAction"
+        @menu-open="handleContextMenuOpen"
+        @menu-close="handleContextMenuClose"
+        @menu-enter="handleContextMenuEnter"
+        @menu-leave="handleContextMenuLeave" />
     </div>
   </div>
 </template>

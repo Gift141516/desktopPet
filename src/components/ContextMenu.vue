@@ -9,6 +9,8 @@
       <div
         class="context-menu"
         :style="{ top: position.y + 'px', left: position.x + 'px' }"
+        @mouseenter="emit('menu-enter')"
+        @mouseleave="emit('menu-leave')"
         @click.stop
       >
         <div
@@ -42,7 +44,7 @@ const menuItems = [
   { id: 'quit', icon: '✖️', label: '退出宠物' },
 ];
 
-const emit = defineEmits(['menu-action']);
+const emit = defineEmits(['menu-action', 'menu-open', 'menu-close', 'menu-enter', 'menu-leave']);
 
 const show = (x, y) => {
   // 确保菜单不会超出屏幕边界
@@ -56,10 +58,13 @@ const show = (x, y) => {
     y: Math.max(0, Math.min(y, maxY))
   };
   visible.value = true;
+  emit('menu-open');
 };
 
 const closeMenu = () => {
+  if (!visible.value) return;
   visible.value = false;
+  emit('menu-close');
 };
 
 const handleItemClick = (item) => {
