@@ -52,8 +52,8 @@ const show = (x, y) => {
   const maxY = window.innerHeight - menuHeight;
 
   position.value = {
-    x: Math.min(x, maxX),
-    y: Math.min(y, maxY)
+    x: Math.max(0, Math.min(x, maxX)),
+    y: Math.max(0, Math.min(y, maxY))
   };
   visible.value = true;
 };

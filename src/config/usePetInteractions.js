@@ -8,6 +8,7 @@ export function usePetInteractions() {
     const savedAudioUrl = ref(null);
 
     let mediaRecorder = null;
+    let mediaStream = null;
     let audioChunks = [];
     let lastTap = 0;
     // 🌟 新增：专门用于提前唤醒音频分析器的函数
@@ -38,8 +39,8 @@ export function usePetInteractions() {
     // --- 录音逻辑 ---
     const startRecording = async () => {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorder = new MediaRecorder(stream);
+            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(mediaStream);
             audioChunks = [];
             mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
             mediaRecorder.start();
@@ -55,7 +56,13 @@ export function usePetInteractions() {
             mediaRecorder.onstop = () => {
                 const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
                 const url = URL.createObjectURL(audioBlob);
+                if (savedAudioUrl.value) {
+                    URL.revokeObjectURL(savedAudioUrl.value);
+                }
                 savedAudioUrl.value = url;
+                mediaStream?.getTracks().forEach((track) => track.stop());
+                mediaStream = null;
+                mediaRecorder = null;
                 resolve(url);
             };
             mediaRecorder.stop();
@@ -175,6 +182,16 @@ export function usePetInteractions() {
 
                     const dataArray = new Uint8Array(analyser.frequencyBinCount);
 
+                    const cleanupPlayback = () => {
+                        onLipSync(0);
+                        try {
+                            source.disconnect();
+                            analyser.disconnect();
+                        } catch (_) {
+                            // WebAudio nodes may already be disconnected.
+                        }
+                    };
+
                     let lastMouthValue = 0;
                     let frameCount = 0;
                     const volumeThreshold = 155;
@@ -210,9 +227,8 @@ export function usePetInteractions() {
                         requestAnimationFrame(animate);
                     };
 
-                    audio.onended = () => {
-                        onLipSync(0);
-                    };
+                    audio.onended = cleanupPlayback;
+                    audio.onerror = cleanupPlayback;
 
                     await audio.play();
                     animate();
@@ -230,9 +246,12 @@ export function usePetInteractions() {
                 audio.oncanplay = setupPlayback;
             }
 
-            audio.onerror = () => {
-                console.error("音频加载失败，错误码:", audio.error.code);
-            };
+            if (!audio.onerror) {
+                audio.onerror = () => {
+                    console.error("音频加载失败，错误码:", audio.error?.code);
+                    onLipSync(0);
+                };
+            }
 
         } catch (err) {
             console.error("handleAction 外部捕获失败:", err);

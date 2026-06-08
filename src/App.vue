@@ -3,7 +3,7 @@ import { usePetInteractions } from './config/usePetInteractions';
 import Live2dViewer from "./views/Live2dViewer.vue";
 import ContextMenu from "./components/ContextMenu.vue";
 import { onMounted, ref, onUnmounted, onBeforeUnmount } from "vue";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { currentMonitor } from "@tauri-apps/api/window";
@@ -11,6 +11,7 @@ import { currentMonitor } from "@tauri-apps/api/window";
 const isSideMode = ref(false);  // 是否启用侧边栏模式
 const isExpanded = ref(false);   // 在侧边栏模式下，当前是否展开
 const currentEdge = ref("right"); // 当前吸附的边缘：left/right/top/bottom
+const ENABLE_AUTO_EDGE_DOCK = false;
 let mouseInContent = false; // 🔥 鼠标是否真正进入了内容区
 let isWindowMoving = false; // 🔥 窗口是否正在移动中
 let pendingCollapse = false; // 🔥 窗口移动期间是否有待处理的收缩请求
@@ -81,10 +82,10 @@ const onMove = (e) => {
   //   handleDrag(e);
   // }
   // 确保能获取到坐标，PIXI 事件通常在 e.data.global 或 nativeEvent 中
-  const screenX = e.screenX || e.data?.global?.x;
-  const screenY = e.screenY || e.data?.global?.y;
+  const screenX = e.screenX ?? e.data?.global?.x;
+  const screenY = e.screenY ?? e.data?.global?.y;
 
-  if (isRecording || isDraggingTriggered.value || !startPos.x || !screenX) return;
+  if (isRecording || isDraggingTriggered.value || startTimestamp === 0 || screenX == null || screenY == null) return;
 
   const dx = screenX - startPos.x;
   const dy = screenY - startPos.y;
@@ -112,9 +113,11 @@ const onUp = async () => {
   startTimestamp = 0; // 重置
 
   if (isDraggingTriggered.value) {
-    // 拖拽结束，检查是否需要自动吸附到边缘
-    console.log("🔥 拖拽结束，开始检查自动吸附...");
-    await checkAutoEdgeDock();
+    if (ENABLE_AUTO_EDGE_DOCK) {
+      // 拖拽结束，检查是否需要自动吸附到边缘
+      console.log("🔥 拖拽结束，开始检查自动吸附...");
+      await checkAutoEdgeDock();
+    }
     isDraggingTriggered.value = false;
     return;
   }
@@ -174,6 +177,8 @@ const onMenuWeather = async () => {
 
 // 🔥 智能边缘吸附检测
 const checkAutoEdgeDock = async () => {
+  if (!ENABLE_AUTO_EDGE_DOCK) return;
+
   try {
     const currentWindow = getCurrentWindow();
 
@@ -236,19 +241,28 @@ const checkAutoEdgeDock = async () => {
 // 核心逻辑：切换窗口侧边状态
 const toggleSide = async (enable) => {
   isSideMode.value = enable;
-  if (enable) {
-    // 启用侧边栏模式：收缩到边缘
-    isExpanded.value = false;
-    await invoke("toggle_side_status", { isHide: true, edge: currentEdge.value });
-  } else {
-    // 禁用侧边栏模式：完全展开
-    isExpanded.value = false;
-    await invoke("toggle_side_status", { isHide: false, edge: currentEdge.value });
+  isProgrammaticOperation = true;
+  try {
+    if (enable) {
+      // 启用侧边栏模式：收缩到边缘
+      isExpanded.value = false;
+      await invoke("toggle_side_status", { isHide: true, edge: currentEdge.value });
+    } else {
+      // 禁用侧边栏模式：完全展开
+      isExpanded.value = false;
+      await invoke("toggle_side_status", { isHide: false, edge: currentEdge.value });
+    }
+  } finally {
+    setTimeout(() => {
+      isProgrammaticOperation = false;
+    }, 500);
   }
 };
 
 // 鼠标划入标签：展开窗口
 const onTabEnter = async () => {
+  if (!isSideMode.value || isExpanded.value || isExpanding) return;
+
   console.log("🟢 [1] 标签 mouseenter - 开始展开");
   console.log(`   当前状态: isExpanded=${isExpanded.value}, mouseInContent=${mouseInContent}`);
 
@@ -347,6 +361,8 @@ let unlistenMove = null; // 🔥 保存 unlisten 函数，用于清理监听器
 onMounted(async () => {
   // 监听窗口位置变化
   unlistenMove = await listen('tauri://move', async (event) => {
+    if (!ENABLE_AUTO_EDGE_DOCK && !isSideMode.value) return;
+
     // 🔥 如果是程序触发的窗口操作，直接忽略（不进入防抖逻辑）
     if (isProgrammaticOperation) {
       console.log("🚫 程序操作触发的move事件，忽略");
@@ -361,9 +377,11 @@ onMounted(async () => {
 
     // 300ms 没有新的移动事件就认为移动结束
     moveEndTimer = setTimeout(async () => {
-      console.log("🛑 窗口移动结束，检查自动吸附");
+      console.log("🛑 窗口移动结束");
       isWindowMoving = false; // 🔥 移动结束
-      await checkAutoEdgeDock();
+      if (ENABLE_AUTO_EDGE_DOCK) {
+        await checkAutoEdgeDock();
+      }
 
       // 🔥 如果移动期间有待处理的收缩请求，现在执行（确保窗口还是展开状态）
       if (pendingCollapse && mouseInContent && isExpanded.value) {
@@ -413,6 +431,7 @@ const handleMenuAction = async (action) => {
     // 🔥 修复：获取当前窗口位置，判断最近的边缘
     const currentWindow = getCurrentWindow();
     const position = await currentWindow.outerPosition();
+    const size = await currentWindow.outerSize();
     const monitor = await currentMonitor();
 
     if (monitor) {
@@ -420,8 +439,8 @@ const handleMenuAction = async (action) => {
       const screenHeight = monitor.size.height;
 
       // 判断窗口中心点靠近哪个边缘
-      const centerX = position.x + 225; // 窗口宽度 450 / 2
-      const centerY = position.y + 300; // 窗口高度 600 / 2
+      const centerX = position.x + size.width / 2;
+      const centerY = position.y + size.height / 2;
 
       const distToLeft = centerX;
       const distToRight = screenWidth - centerX;
